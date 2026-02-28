@@ -12,8 +12,12 @@ interface Sighting {
     region: string;
     imgUrl: string;
     link: string;
+    source: 'Karrot' | 'PawInHand';
+    timestamp: string;
     analysis?: {
         isDog: boolean;
+        aiMatchScore: number;
+        featureMatchScore: number;
         breed: string;
         size: string;
         color: string;
@@ -124,6 +128,47 @@ export default function SightingsPage() {
         }
     };
 
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+    const analyzePendingSightings = async (currentSightings: Sighting[], dog: any) => {
+        const toAnalyze = currentSightings.filter(s => !s.analysis?.aiMatchScore);
+        if (toAnalyze.length === 0) return;
+
+        setIsAnalyzing(true);
+        addLog(`${toAnalyze.length}개의 게시글 AI 분석을 시작합니다...`, "ai");
+
+        const batchSize = 5;
+        for (let i = 0; i < toAnalyze.length; i += batchSize) {
+            const batch = toAnalyze.slice(i, i + batchSize);
+            try {
+                const response = await fetch('/api/analyze/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ items: batch, dogProfile: dog })
+                });
+                const data = await response.json();
+
+                if (data.results) {
+                    setSightings(prev => {
+                        const next = [...prev];
+                        batch.forEach((item, idx) => {
+                            const foundIdx = next.findIndex(s => s.link === item.link);
+                            if (foundIdx !== -1 && data.results[idx]) {
+                                next[foundIdx] = { ...next[foundIdx], analysis: data.results[idx] };
+                            }
+                        });
+                        return next;
+                    });
+                    addLog(`${Math.min(i + batchSize, toAnalyze.length)}/${toAnalyze.length} 분석 완료...`, "ai");
+                }
+            } catch (err) {
+                console.error("Batch analysis failed", err);
+            }
+        }
+        setIsAnalyzing(false);
+        addLog("모든 게시글 AI 분석이 완료되었습니다.", "success");
+    };
+
     const fetchSightings = async (lat?: number, lon?: number) => {
         // Validate location first
         const error = validateLocation(searchLocation);
@@ -178,11 +223,14 @@ export default function SightingsPage() {
                 setSightings(sortedSightings);
 
                 if (myDog) {
-                    const topMatch = sortedSightings.find((s: any) => (s.analysis?.matchScore || 0) > 0.8);
+                    const topMatch = sortedSightings.find((s: any) => (s.analysis?.aiMatchScore || 0) > 0.8);
                     if (topMatch) {
                         setNotification(`내 강아지와 매우 유사한 포스트가 발견되었습니다!`);
                     }
                 }
+
+                // Trigger background analysis for raw sightings
+                analyzePendingSightings(sortedSightings, myDog);
             }
             else {
                 addLog(`스캔 실패: ${data.error}`, "warning");
@@ -405,20 +453,15 @@ export default function SightingsPage() {
                     ) : (
                         <div className="space-y-12">
                             {/* Best Matches / Highlights */}
-                            {sightings.filter((s: any) => (s.analysis?.matchScore || 0) > 0.6).length > 0 && (
+                            {sightings.filter((s: any) => (s.analysis?.aiMatchScore || 0) > 0.6).length > 0 && (
                                 <section>
                                     <div className="flex items-center gap-3 mb-8">
                                         <Sparkles className="w-6 h-6 text-primary" />
                                         <h2 className="text-2xl font-black text-secondary italic uppercase tracking-tight">Best Matches</h2>
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                                        {sightings.filter((s: any) => (s.analysis?.matchScore || 0) > 0.6).map((s: any, i: number) => {
-                                            const featureScore = myDog && s.analysis ? calculateMatchScore(myDog, {
-                                                breed: s.analysis.breed,
-                                                size: s.analysis.size,
-                                                color: s.analysis.color,
-                                                features: s.analysis.features
-                                            }) : 0;
+                                        {sightings.filter((s: any) => (s.analysis?.aiMatchScore || 0) > 0.6).map((s: any, i: number) => {
+                                            const featureScore = s.analysis?.featureMatchScore || 0;
 
                                             return (
                                                 <motion.article
@@ -433,14 +476,19 @@ export default function SightingsPage() {
                                                     </div>
 
                                                     <div className="absolute top-8 left-8 z-20 flex flex-col gap-2">
-                                                        <div className="px-4 py-2 bg-primary text-white rounded-xl shadow-xl flex items-center gap-2 font-black text-[10px] italic tracking-widest">
+                                                        <div className={`px-4 py-2 ${s.analysis ? 'bg-primary' : 'bg-slate-400 animate-pulse'} text-white rounded-xl shadow-xl flex items-center gap-2 font-black text-[10px] italic tracking-widest`}>
                                                             <Cpu className="w-3.5 h-3.5" />
-                                                            AI: {Math.round((s.analysis?.matchScore || 0) * 100)}%
+                                                            {s.analysis ? `AI: ${Math.round((s.analysis.aiMatchScore || 0) * 100)}%` : 'ANALYZING...'}
                                                         </div>
-                                                        {featureScore > 0 && (
+                                                        {s.analysis ? (
                                                             <div className="px-4 py-2 bg-secondary text-white rounded-xl shadow-xl flex items-center gap-2 font-black text-[10px] italic tracking-widest">
                                                                 <Dog className="w-3.5 h-3.5" />
-                                                                FEATURES: {Math.round(featureScore * 100)}%
+                                                                FEATURES: {Math.round((s.analysis.featureMatchScore || 0) * 100)}%
+                                                            </div>
+                                                        ) : (
+                                                            <div className="px-4 py-2 bg-slate-300 animate-pulse text-white rounded-xl shadow-xl flex items-center gap-2 font-black text-[10px] italic tracking-widest">
+                                                                <Database className="w-3.5 h-3.5" />
+                                                                MATCHING...
                                                             </div>
                                                         )}
                                                     </div>
@@ -501,12 +549,7 @@ export default function SightingsPage() {
                                             </thead>
                                             <tbody className="divide-y divide-slate-50">
                                                 {sightings.map((s: any, i: number) => {
-                                                    const featureScore = myDog && s.analysis ? calculateMatchScore(myDog, {
-                                                        breed: s.analysis.breed,
-                                                        size: s.analysis.size,
-                                                        color: s.analysis.color,
-                                                        features: s.analysis.features
-                                                    }) : 0;
+                                                    const featureScore = s.analysis?.featureMatchScore || 0;
 
                                                     return (
                                                         <tr key={`list-${i}`} className="hover:bg-slate-50/50 transition-colors group">
@@ -532,14 +575,22 @@ export default function SightingsPage() {
                                                                 </span>
                                                             </td>
                                                             <td className="px-4 py-5 text-center">
-                                                                <span className={`text-[10px] font-black italic ${s.analysis?.matchScore > 0.6 ? 'text-primary' : 'text-slate-400'}`}>
-                                                                    {Math.round((s.analysis?.matchScore || 0) * 100)}%
-                                                                </span>
+                                                                {s.analysis ? (
+                                                                    <span className={`text-[10px] font-black italic ${s.analysis.aiMatchScore > 0.6 ? 'text-primary' : 'text-slate-400'}`}>
+                                                                        {Math.round(s.analysis.aiMatchScore * 100)}%
+                                                                    </span>
+                                                                ) : (
+                                                                    <RefreshCw className="w-3 h-3 text-slate-300 animate-spin mx-auto" />
+                                                                )}
                                                             </td>
                                                             <td className="px-4 py-5 text-center">
-                                                                <span className={`text-[10px] font-black italic ${featureScore > 0.6 ? 'text-secondary' : 'text-slate-400'}`}>
-                                                                    {Math.round(featureScore * 100)}%
-                                                                </span>
+                                                                {s.analysis ? (
+                                                                    <span className={`text-[10px] font-black italic ${s.analysis.featureMatchScore > 0.6 ? 'text-secondary' : 'text-slate-400'}`}>
+                                                                        {Math.round(s.analysis.featureMatchScore * 100)}%
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="text-[9px] font-bold text-slate-200">-</span>
+                                                                )}
                                                             </td>
                                                             <td className="px-8 py-5 text-right">
                                                                 <a

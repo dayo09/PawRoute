@@ -1,7 +1,5 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
-
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_GENERATIVE_AI_API_KEY || "");
+import { safeGenerateContent } from "@/lib/gemini";
 
 export async function POST(req: Request) {
     try {
@@ -25,8 +23,6 @@ export async function POST(req: Request) {
             })
         );
 
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
         const prompt = `
       You are an expert dog behaviorist and breed specialist. 
       Analyze the provided images of a dog and extract the following features in JSON format (Value should be in Korean):
@@ -42,12 +38,10 @@ export async function POST(req: Request) {
       Output ONLY the JSON.
     `;
 
-        const result = await model.generateContent([prompt, ...imageParts]);
-        const response = await result.response;
-        const text = response.text();
+        const resultText = await safeGenerateContent("gemini-2.5-flash-lite", [prompt, ...imageParts]);
 
         // Extract JSON from potential markdown code blocks
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        const jsonMatch = resultText.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
             throw new Error("Failed to parse Gemini response");
         }

@@ -1,109 +1,7 @@
 import { NextResponse } from 'next/server';
 import { chromium } from 'playwright';
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import sightingStore from '@/lib/sightingStore';
-import geminiLimiter from '@/lib/geminiLimiter';
 import { calculateMatchScore } from '@/lib/matcher';
-
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_GENERATIVE_AI_API_KEY || "");
-
-async function analyzeSightingsBatch(items: { imgUrl: string, content: string, link: string }[], dogProfile?: any) {
-    if (items.length === 0) return [];
-
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
-        // 1. Prepare image data parts for Gemini
-        const imageParts = await Promise.all(items.map(async (item) => {
-            if (!item.imgUrl || item.imgUrl.includes('data:image')) return null;
-            try {
-                const resp = await fetch(item.imgUrl);
-                if (!resp.ok) return null;
-                const buffer = await resp.arrayBuffer();
-                return {
-                    inlineData: {
-                        data: Buffer.from(buffer).toString("base64"),
-                        mimeType: resp.headers.get("content-type") || "image/jpeg"
-                    }
-                };
-            } catch (e) {
-                console.error(`Failed to fetch image for ${item.link}:`, e);
-                return null;
-            }
-        }));
-
-        const validIndices: number[] = [];
-        const validImages: any[] = [];
-        imageParts.forEach((part, i) => {
-            if (part) {
-                validIndices.push(i);
-                validImages.push(part);
-            }
-        });
-
-        const contentsPrompt = items.map((item, i) =>
-            `[Item ${i}] (Link: ${item.link}): "${item.content}"`
-        ).join('\n\n');
-
-        const dogContext = dogProfile ? `The user is looking for a dog with these characteristics:
-- Breed: ${dogProfile.breed}
-- Color: ${dogProfile.primaryColor} ${dogProfile.secondaryColor || ''}
-- Features: ${dogProfile.features?.join(', ')}
-` : "";
-
-        const systemInstructions = `
-You are an expert dog behaviorist analyzing community posts for lost/found dogs.
-Analyze the provided items (each item has a text description and potentially an image).
-Determine if they match the lost dog described below.
-
-${dogContext}
-
-For EACH item, return a JSON object with:
-- "index": the item number
-- "isDog": boolean
-- "matchScore": number (0.0 to 1.0) - How well this post matches the user's dog.
-- "breed": Extracted breed in Korean
-- "size": 소형/중형/대형
-- "color": Extracted color in Korean
-- "features": array of unique features
-- "isLostOrFound": "lost" | "found" | "unknown"
-
-Return ONLY a JSON array of these objects.
-`;
-
-        const parts: any[] = [systemInstructions];
-
-        // Interleave text and images for better association
-        items.forEach((item, i) => {
-            parts.push(`--- ITEM ${i} ---`);
-            parts.push(`Description: "${item.content}"`);
-            if (imageParts[i]) {
-                parts.push(imageParts[i]);
-            }
-        });
-
-        const allowed = await geminiLimiter.waitAcquire();
-        if (!allowed) return items.map(() => null);
-
-        const result = await model.generateContent(parts);
-        const text = result.response.text();
-        const jsonMatch = text.match(/\[[\s\S]*\]/);
-        const batchResults = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
-
-        const resultsMap = new Map();
-        batchResults.forEach((res: any) => {
-            if (typeof res.index === 'number') {
-                resultsMap.set(res.index, res);
-            }
-        });
-
-        return items.map((_, i) => resultsMap.get(i) || null);
-
-    } catch (error) {
-        console.error("Batch Analysis error:", error);
-        return items.map(() => null);
-    }
-}
 
 export async function POST(req: Request) {
     let browser;
@@ -125,7 +23,6 @@ export async function POST(req: Request) {
 
         // 1. Navigation to '동네생활'
         console.log("Clicking '중고거래'...");
-        // Using evaluate click for better reliability on dynamically rendered elements
         await page.evaluate(() => {
             const elements = Array.from(document.querySelectorAll('span, a, button'));
             const target = elements.find(el => el.textContent?.trim() === '중고거래');
@@ -155,7 +52,6 @@ export async function POST(req: Request) {
         await locationInput.type(location, { delay: 150 });
 
         console.log(`Selecting choice for: ${location}`);
-        // Remove exact: true because the result might be "우면동 (서울특별시 서초구)"
         const resultItem = page.locator(`text=${location}`).last();
 
         try {
@@ -184,14 +80,9 @@ export async function POST(req: Request) {
             return elements.map((el) => {
                 const title = el.querySelector('h2')?.textContent?.trim() || "";
                 const content = el.querySelector('p')?.textContent?.trim() || "";
-
-                // Region is often in a metadata area
                 const region = el.querySelector('span span')?.textContent?.trim() || "";
-
-                // Get timestamp for sorting
                 const timeEl = el.querySelector('time');
                 const timestamp = timeEl ? timeEl.getAttribute('datetime') : new Date().toISOString();
-
                 const img = el.querySelector('img');
                 const imgUrl = img ? (img.getAttribute('srcset')?.split(' ')[0] || img.src) : "";
 
@@ -207,66 +98,26 @@ export async function POST(req: Request) {
 
         await browser.close();
 
-        // 5. Filter and analyze
-        const filterKeywords = ['발견', '목격', '보호', '찾아요', '실종', '강아지', '개', '유기견'];
-        const candidates = articles.filter(art =>
-            filterKeywords.some(kw => art.content?.includes(kw) || art.title?.includes(kw))
-        ).slice(0, 40); // Increased limit
-
-        const analyzedResults = [];
-        const toBatch = [];
-
-        for (const art of candidates) {
-            // Check if we already have this in store
+        // 5. Transform and return results immediately
+        const results = articles.map(art => {
             const existing = sightingStore.get(art.link);
-
-            if (existing?.analysis) {
-                console.log("Using stored result for:", art.link);
-                // Dynamically update match score based on current dogProfile
-                if (dogProfile) {
-                    existing.analysis.matchScore = calculateMatchScore(dogProfile, {
-                        breed: existing.analysis.breed,
-                        size: existing.analysis.size,
-                        color: existing.analysis.color,
-                        features: existing.analysis.features
-                    });
-                }
-                analyzedResults.push(existing);
-            } else if (art.imgUrl && !art.imgUrl.includes('data:image')) {
-                toBatch.push(art);
-            } else {
-                const basicArticle = {
-                    ...art,
-                    source: 'Karrot' as const,
-                    keyword,
-                    timestamp: art.timestamp || new Date().toISOString()
-                };
-                sightingStore.add(basicArticle);
-                analyzedResults.push(basicArticle);
+            if (existing) {
+                return { ...existing, source: 'Karrot' as const, keyword };
             }
-        }
-
-        // Perform batch analysis in chunks of 15 to stay safe
-        if (toBatch.length > 0) {
-            const chunkSize = 15;
-            for (let i = 0; i < toBatch.length; i += chunkSize) {
-                const chunk = toBatch.slice(i, i + chunkSize);
-                console.log(`Batch analyzing ${chunk.length} Karrot candidates...`);
-                const batchAnalyses = await analyzeSightingsBatch(chunk, dogProfile);
-
-                chunk.forEach((art, j) => {
-                    const analysis = batchAnalyses[j];
-                    const fullArticle = { ...art, analysis, source: 'Karrot' as const, keyword, timestamp: art.timestamp || new Date().toISOString() };
-                    sightingStore.add(fullArticle);
-                    analyzedResults.push(fullArticle);
-                });
-            }
-        }
+            const sighting = {
+                ...art,
+                source: 'Karrot' as const,
+                keyword,
+                timestamp: art.timestamp || new Date().toISOString()
+            };
+            sightingStore.add(sighting);
+            return sighting;
+        });
 
         return NextResponse.json({
             success: true,
-            count: analyzedResults.length,
-            data: analyzedResults
+            count: results.length,
+            data: results
         });
 
     } catch (error) {
