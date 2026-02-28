@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Search, MapPin, RefreshCw, ExternalLink, Calendar, Dog, LayoutGrid, List, Bell, Sparkles, Terminal, Cpu, Database, CheckCircle2, Navigation } from "lucide-react";
+import { Search, MapPin, RefreshCw, ExternalLink, Calendar, Dog, LayoutGrid, List, Bell, Sparkles, Terminal, Cpu, Database, CheckCircle2, Navigation, X } from "lucide-react";
 import Image from "next/image";
 import { calculateMatchScore } from "@/lib/matcher";
 
@@ -36,6 +36,10 @@ export default function SightingsPage() {
     const [notification, setNotification] = useState<string | null>(null);
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [location, setLocation] = useState<{ lat: number, lon: number } | null>(null);
+    const [isAutoScan, setIsAutoScan] = useState(false);
+    const [searchLocation, setSearchLocation] = useState("우면동");
+    const [searchKeyword, setSearchKeyword] = useState("유기견");
+    const [locationError, setLocationError] = useState<string | null>(null);
 
     const addLog = (message: string, type: LogEntry["type"] = "info") => {
         const newLog = {
@@ -44,7 +48,7 @@ export default function SightingsPage() {
             message,
             type
         };
-        setLogs(prev => [newLog, ...prev].slice(0, 10));
+        setLogs(prev => [newLog, ...prev].slice(0, 15));
     };
 
     useEffect(() => {
@@ -52,9 +56,28 @@ export default function SightingsPage() {
         if (savedDog) {
             setMyDog(JSON.parse(savedDog));
         }
-        // Try to get location on mount
+        // Initially trigger location check
         handleUseLocation();
     }, []);
+
+    const validateLocation = (loc: string) => {
+        const regex = /^[가-힣]+(동|읍|면)$/;
+        if (!regex.test(loc)) {
+            return "주소는 '동', '읍', 또는 '면'으로 끝나야 합니다. (예: 우면동)";
+        }
+        return null;
+    };
+
+    useEffect(() => {
+        let interval: NodeJS.Timeout;
+        if (isAutoScan) {
+            addLog("자동 탐색 모드 활성화: 3분마다 스캔을 실행합니다.", "success");
+            interval = setInterval(() => {
+                fetchSightings(location?.lat, location?.lon);
+            }, 3 * 60 * 1000);
+        }
+        return () => clearInterval(interval);
+    }, [isAutoScan, location, searchLocation, searchKeyword]);
 
     const handleUseLocation = () => {
         if ("geolocation" in navigator) {
@@ -64,6 +87,22 @@ export default function SightingsPage() {
                     const { latitude, longitude } = position.coords;
                     setLocation({ lat: latitude, lon: longitude });
                     addLog("위치 승인 완료: 내 주변 동네를 탐색합니다.", "success");
+
+                    // Try to reverse geocode to get the "Dong" name
+                    fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&addressdetails=1`)
+                        .then(res => res.json())
+                        .then(data => {
+                            const addr = data.address;
+                            const dong = addr.suburb || addr.neighbourhood || addr.city_district || "";
+                            if (dong && (dong.endsWith('동') || dong.endsWith('읍') || dong.endsWith('면'))) {
+                                setSearchLocation(dong);
+                                addLog(`현재 위치(${dong})로 동네를 설정했습니다.`, "info");
+                            }
+                        })
+                        .catch(() => {
+                            addLog("동네 이름을 자동으로 가져오지 못했습니다. 직접 입력해 주세요.", "info");
+                        });
+
                     fetchSightings(latitude, longitude);
                 },
                 (error) => {
@@ -78,36 +117,50 @@ export default function SightingsPage() {
     };
 
     const fetchSightings = async (lat?: number, lon?: number) => {
+        // Validate location first
+        const error = validateLocation(searchLocation);
+        if (error) {
+            addLog(error, "warning");
+            setLocationError(error);
+            return;
+        }
+        setLocationError(null);
+
         setLoading(true);
-        setLogs([]);
-        addLog("스크래핑 엔진 초기화 중...", "info");
-        addLog("당근마켓 '동네생활' 섹션 접근 중...", "info");
+        addLog("통합 스캔 엔진 기동 중 (당근마켓 + 포인핸드)...", "info");
 
         try {
-            const resp = await fetch("/api/scrape/karrot", {
+            const resp = await fetch("/api/scan", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     latitude: lat || location?.lat || 37.5665,
-                    longitude: lon || location?.lon || 126.9780
+                    longitude: lon || location?.lon || 126.9780,
+                    location: searchLocation,
+                    keyword: searchKeyword
                 })
             });
             const data = await resp.json();
 
             if (data.success) {
-                addLog(data.isMock ? "데모 모드: 시뮬레이션 데이터를 불러왔습니다." : `${data.data.length}개의 관련 게시글을 발견했습니다.`, "success");
-                addLog("Gemini 3 멀티모달 분석 엔진 가동...", "ai");
+                addLog(`스캔 완료: 당근(${data.summary.karrot}) + 포인핸드(${data.summary.pawinhand})`, "success");
 
-                data.data.forEach((s: Sighting, i: number) => {
-                    if (s.analysis) {
-                        addLog(`[Sighting ${i + 1}] 분석: ${s.analysis.breed} / ${s.analysis.features[0] || "특징 분석 중"}`, "ai");
-                    }
+                // Sort by timestamp if available, latest first
+                const sortedSightings = data.results.sort((a: any, b: any) => {
+                    const timeA = new Date(a.timestamp || 0).getTime();
+                    const timeB = new Date(b.timestamp || 0).getTime();
+                    return timeB - timeA;
                 });
 
-                setSightings(data.data);
+                setSightings(sortedSightings);
+
+                // Add each finding to the log
+                sortedSightings.forEach((s: any) => {
+                    addLog(`[${s.source}] 발견: ${s.title || s.content.substring(0, 20) + '...'}`, "info");
+                });
 
                 if (myDog) {
-                    const matches = data.data.filter((s: Sighting) => {
+                    const matches = sortedSightings.filter((s: any) => {
                         if (!s.analysis) return false;
                         const score = calculateMatchScore(myDog, {
                             breed: s.analysis.breed,
@@ -121,12 +174,10 @@ export default function SightingsPage() {
                     if (matches.length > 0) {
                         setNotification(`${matches.length}마리의 일치하는 강아지가 발견되었습니다!`);
                         addLog(`매칭 발견! 일치율 ${Math.round(calculateMatchScore(myDog, matches[0].analysis!) * 100)}%`, "success");
-                    } else {
-                        addLog("현재 일치하는 목격 정보가 없습니다.", "warning");
                     }
                 }
             } else {
-                addLog(`스크래핑 실패: ${data.error}`, "warning");
+                addLog(`스캔 실패: ${data.error}`, "warning");
             }
         } catch (err) {
             addLog("네트워크 오류 발생", "warning");
@@ -142,9 +193,17 @@ export default function SightingsPage() {
                 {/* Left Sidebar: Process Logs and Location */}
                 <aside className="lg:col-span-1 space-y-6">
                     <div className="bg-secondary p-6 rounded-[2rem] shadow-2xl border border-slate-800 flex flex-col h-[500px]">
-                        <div className="flex items-center gap-2 mb-6 text-primary">
-                            <Terminal className="w-5 h-5" />
-                            <h2 className="font-black text-sm uppercase tracking-widest text-white">Live Process Log</h2>
+                        <div className="flex items-center justify-between mb-6">
+                            <div className="flex items-center gap-2 text-primary">
+                                <Terminal className="w-5 h-5" />
+                                <h2 className="font-black text-sm uppercase tracking-widest text-white">Live Log</h2>
+                            </div>
+                            <button
+                                onClick={() => setIsAutoScan(!isAutoScan)}
+                                className={`px-3 py-1 rounded-full text-[10px] font-black tracking-tighter transition-all ${isAutoScan ? 'bg-primary text-white animate-pulse' : 'bg-slate-700 text-slate-400'}`}
+                            >
+                                {isAutoScan ? 'AUTO-SCAN ON' : 'AUTO-SCAN OFF'}
+                            </button>
                         </div>
 
                         <div className="flex-1 overflow-y-auto space-y-3 font-mono text-[11px]">
@@ -155,9 +214,9 @@ export default function SightingsPage() {
                                         initial={{ opacity: 0, x: -5 }}
                                         animate={{ opacity: 1, x: 0 }}
                                         className={`p-3 rounded-xl border ${log.type === "ai" ? "bg-primary/10 border-primary/20 text-primary" :
-                                                log.type === "success" ? "bg-accent/10 border-accent/20 text-accent" :
-                                                    log.type === "warning" ? "bg-danger/10 border-danger/20 text-danger" :
-                                                        "bg-slate-800 border-slate-700 text-slate-400"
+                                            log.type === "success" ? "bg-accent/10 border-accent/20 text-accent" :
+                                                log.type === "warning" ? "bg-danger/10 border-danger/20 text-danger" :
+                                                    "bg-slate-800 border-slate-700 text-slate-400"
                                             }`}
                                     >
                                         <span className="opacity-40 mr-1">[{log.timestamp}]</span>
@@ -196,13 +255,51 @@ export default function SightingsPage() {
                                 <div className="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center border border-white/10">
                                     <Dog className="w-6 h-6 text-primary" />
                                 </div>
-                                <div>
-                                    <h4 className="font-black text-white leading-tight">{myDog.breed}</h4>
-                                    <p className="text-xs text-slate-400 font-bold">{myDog.size} • {myDog.primaryColor}</p>
+                                <div className="flex-1 overflow-hidden">
+                                    <h4 className="font-black text-white leading-tight truncate">{myDog.breed}</h4>
+                                    <p className="text-xs text-slate-400 font-bold truncate">{myDog.size} • {myDog.primaryColor}</p>
                                 </div>
                             </div>
                         </div>
                     )}
+
+                    <div className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-xl shadow-slate-200/50 space-y-5">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic mb-2">Search Filters</p>
+
+                        <div>
+                            <label className="text-[10px] font-bold text-slate-500 mb-2 block uppercase tracking-wider">탐색 동네 (동/읍/면)</label>
+                            <div className="relative">
+                                <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                                <input
+                                    type="text"
+                                    value={searchLocation}
+                                    onChange={(e) => setSearchLocation(e.target.value)}
+                                    placeholder="예: 우면동"
+                                    className={`w-full pl-11 pr-4 py-3.5 bg-slate-50 border ${locationError ? 'border-danger/50 ring-2 ring-danger/10' : 'border-slate-200'} rounded-2xl text-sm font-bold focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-slate-300`}
+                                />
+                            </div>
+                            {locationError && (
+                                <p className="text-[9px] text-danger mt-2 font-bold flex items-center gap-1">
+                                    <X className="w-2 h-2" />
+                                    {locationError}
+                                </p>
+                            )}
+                        </div>
+
+                        <div>
+                            <label className="text-[10px] font-bold text-slate-500 mb-2 block uppercase tracking-wider">검색어</label>
+                            <div className="relative">
+                                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                                <input
+                                    type="text"
+                                    value={searchKeyword}
+                                    onChange={(e) => setSearchKeyword(e.target.value)}
+                                    placeholder="예: 유기견, 강아지"
+                                    className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-slate-300"
+                                />
+                            </div>
+                        </div>
+                    </div>
                 </aside>
 
                 {/* Main Content: Sightings */}
@@ -228,7 +325,7 @@ export default function SightingsPage() {
                                         onClick={() => setNotification(null)}
                                         className="p-4 bg-black/10 hover:bg-black/20 rounded-full transition-transform hover:rotate-90"
                                     >
-                                        <Search className="w-8 h-8 rotate-45" />
+                                        <X className="w-8 h-8" />
                                     </button>
                                 </div>
                             </motion.div>
@@ -242,9 +339,14 @@ export default function SightingsPage() {
                                     <div className="w-2 h-2 bg-accent rounded-full animate-pulse" />
                                     <span className="text-[10px] font-black text-accent uppercase tracking-widest italic">Live Scanning</span>
                                 </div>
+                                {isAutoScan && (
+                                    <div className="px-3 py-1 bg-primary/10 border border-primary/20 rounded-full flex items-center gap-2">
+                                        <span className="text-[10px] font-black text-primary uppercase tracking-widest italic">Auto-Refresh Active</span>
+                                    </div>
+                                )}
                             </div>
                             <h1 className="text-6xl font-black text-secondary tracking-tighter mb-2 italic uppercase leading-none">Nearby Posts</h1>
-                            <p className="text-slate-500 text-xl font-medium max-w-xl">당근마켓 동네생활 섹션을 Gemini 3가 24시간 감시하여 내 주변의 유기견 소식을 전해드립니다.</p>
+                            <p className="text-slate-500 text-xl font-medium max-w-xl">당근마켓과 포인핸드를 Gemini AI가 실시간 감시하여 잃어버린 가족의 소식을 전해드립니다.</p>
                         </div>
 
                         <button
@@ -267,12 +369,12 @@ export default function SightingsPage() {
                                 />
                             </div>
                             <Cpu className="w-20 h-20 text-slate-100 mb-8 animate-pulse" />
-                            <p className="text-3xl font-black text-slate-300 italic uppercase tracking-tighter">Analyzing Community Feed...</p>
+                            <p className="text-3xl font-black text-slate-300 italic uppercase tracking-tighter">Analyzing Multi-source Feed...</p>
                         </div>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
                             <AnimatePresence mode="popLayout">
-                                {sightings.map((s, i) => {
+                                {sightings.map((s: any, i: number) => {
                                     const matchScore = myDog && s.analysis ? calculateMatchScore(myDog, {
                                         breed: s.analysis.breed,
                                         size: s.analysis.size,
@@ -289,6 +391,10 @@ export default function SightingsPage() {
                                             animate={{ opacity: 1, scale: 1 }}
                                             className={`bg-white rounded-[3.5rem] border border-slate-100 shadow-2xl shadow-slate-200/40 relative overflow-hidden group flex flex-col ${isMatch ? "ring-8 ring-primary/20" : ""}`}
                                         >
+                                            <div className="absolute top-6 right-6 z-20 px-4 py-2 bg-white/90 backdrop-blur rounded-xl shadow-sm border border-slate-100 text-[10px] font-black text-slate-500 tracking-widest uppercase">
+                                                {s.source}
+                                            </div>
+
                                             {isMatch && (
                                                 <div className="absolute top-8 left-8 z-20 px-6 py-3 bg-primary text-white rounded-2xl shadow-2xl flex items-center gap-2 font-black text-sm animate-bounce italic tracking-widest">
                                                     <CheckCircle2 className="w-5 h-5 font-bold" />
@@ -296,27 +402,33 @@ export default function SightingsPage() {
                                                 </div>
                                             )}
 
-                                            <div className="relative aspect-[4/3] overflow-hidden">
+                                            <div className="relative h-48 overflow-hidden">
                                                 <Image
                                                     src={s.imgUrl || "https://images.unsplash.com/photo-1543466835-00a7907e9de1"}
                                                     alt={s.title}
                                                     fill
                                                     className="object-cover group-hover:scale-105 transition-transform duration-1000"
                                                 />
-                                                <div className="absolute bottom-6 left-6 flex gap-2">
-                                                    <span className={`px-5 py-2.5 rounded-2xl text-[10px] font-black shadow-2xl backdrop-blur-xl border border-white/20 ${s.analysis?.isLostOrFound === "found" ? "bg-accent text-white" : "bg-primary text-white"}`}>
+                                                <div className="absolute bottom-4 left-6 flex gap-2">
+                                                    <span className={`px-4 py-1.5 rounded-xl text-[9px] font-black shadow-2xl backdrop-blur-xl border border-white/20 ${s.analysis?.isLostOrFound === "found" ? "bg-accent text-white" : "bg-primary text-white"}`}>
                                                         {s.analysis?.isLostOrFound === "found" ? "SIGHTED / RESCUED" : "LOST"}
                                                     </span>
                                                 </div>
                                             </div>
 
-                                            <div className="p-10 flex flex-col flex-1">
-                                                <div className="flex items-center gap-2 text-slate-400 mb-5 font-black text-[10px] uppercase tracking-[0.3em]">
-                                                    <MapPin className="w-4 h-4 text-primary" />
+                                            <div className="p-6 flex flex-col flex-1">
+                                                <div className="flex items-center gap-2 text-slate-400 mb-3 font-black text-[9px] uppercase tracking-[0.2em]">
+                                                    <MapPin className="w-3.5 h-3.5 text-primary" />
                                                     {s.region}
+                                                    {s.timestamp && (
+                                                        <>
+                                                            <span className="mx-1">•</span>
+                                                            {new Date(s.timestamp).toLocaleDateString()}
+                                                        </>
+                                                    )}
                                                 </div>
-                                                <h3 className="text-3xl font-black text-secondary mb-5 line-clamp-1 italic tracking-tight">{s.title || "Untitled Sighting"}</h3>
-                                                <p className="text-slate-500 font-medium text-lg line-clamp-2 mb-10 leading-relaxed">{s.content}</p>
+                                                <h3 className="text-xl font-black text-secondary mb-3 line-clamp-1 italic tracking-tight">{s.title || "Untitled Sighting"}</h3>
+                                                <p className="text-slate-500 font-medium text-sm line-clamp-2 mb-6 leading-relaxed">{s.content}</p>
 
                                                 <div className="mt-auto flex items-center justify-between pt-8 border-t border-slate-100">
                                                     <div className="flex -space-x-3">
@@ -329,6 +441,7 @@ export default function SightingsPage() {
                                                     <a
                                                         href={s.link}
                                                         target="_blank"
+                                                        rel="noopener noreferrer"
                                                         className="px-6 py-3 bg-secondary text-white rounded-2xl font-black text-xs hover:bg-slate-800 transition-all flex items-center gap-2 shadow-lg shadow-slate-200"
                                                     >
                                                         VIEW ORIGIN

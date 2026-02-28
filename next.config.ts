@@ -17,6 +17,14 @@ const nextConfig: NextConfig = {
         protocol: 'https',
         hostname: 'www.daangn.com',
       },
+      {
+        protocol: 'https',
+        hostname: 'community-api-cdn.kr.karrotmarket.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 'pawinhand.kr',
+      },
     ],
   },
 };
