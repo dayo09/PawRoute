@@ -13,6 +13,7 @@ export interface Sighting {
     timestamp: string;
     analysis?: {
         isDog: boolean;
+        matchScore: number;
         breed: string;
         size: string;
         color: string;

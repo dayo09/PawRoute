@@ -3,16 +3,16 @@ import { chromium } from 'playwright';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import sightingStore from '@/lib/sightingStore';
 import geminiLimiter from '@/lib/geminiLimiter';
+import { calculateMatchScore } from '@/lib/matcher';
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_GENERATIVE_AI_API_KEY || "");
 
-async function analyzeSightingsBatch(items: { imgUrl: string, content: string, link: string }[]) {
+async function analyzeSightingsBatch(items: { imgUrl: string, content: string, link: string }[], dogProfile?: any) {
     if (items.length === 0) return [];
 
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-        // 1. Prepare image data parts for Gemini
         const imageParts = await Promise.all(items.map(async (item) => {
             if (!item.imgUrl || item.imgUrl.includes('data:image')) return null;
             try {
@@ -31,63 +31,61 @@ async function analyzeSightingsBatch(items: { imgUrl: string, content: string, l
             }
         }));
 
-        // Filter valid parts
-        const validIndices: number[] = [];
-        const validImages: any[] = [];
-        imageParts.forEach((part, i) => {
-            if (part) {
-                validIndices.push(i);
-                validImages.push(part);
+        const validImages: any[] = imageParts.filter(part => part !== null);
+
+        const contentsPrompt = items.map((item, i) =>
+            `[Item ${i}] (Link: ${item.link}): "${item.content}"`
+        ).join('\n\n');
+
+        const dogContext = dogProfile ? `The user is looking for a dog with these characteristics:
+- Breed: ${dogProfile.breed}
+- Color: ${dogProfile.primaryColor} ${dogProfile.secondaryColor || ''}
+- Features: ${dogProfile.features?.join(', ')}
+` : "";
+
+        const systemInstructions = `
+You are an expert dog behaviorist analyzing community posts from PawInHand.
+Analyze the provided items (each item has a text description and potentially an image).
+Determine if they match the lost dog described below.
+
+${dogContext}
+
+For EACH item, return a JSON object with:
+- "index": the item number
+- "isDog": boolean
+- "matchScore": number (0.0 to 1.0) - How well this post matches the user's dog.
+- "breed": Extracted breed in Korean
+- "size": 소형/중형/대형
+- "color": Extracted color in Korean
+- "features": array of unique features
+- "isLostOrFound": "lost" | "found" | "unknown"
+
+Return ONLY a JSON array of these objects.
+`;
+
+        const parts: any[] = [systemInstructions];
+
+        // Interleave text and images
+        items.forEach((item, i) => {
+            parts.push(`--- ITEM ${i} ---`);
+            parts.push(`Description: "${item.content}"`);
+            if (imageParts[i]) {
+                parts.push(imageParts[i]);
             }
         });
 
-        if (validImages.length === 0) return items.map(() => null);
-
-        // 2. Build Prompt
-        const contentsPrompt = validIndices.map((idx, i) =>
-            `[Item ${i}] (Link: ${items[idx].link}): "${items[idx].content}"`
-        ).join('\n\n');
-
-        const prompt = `
-You are an expert dog behaviorist analyzing multiple community posts from PawInHand.
-I have provided ${validImages.length} images. Analyze each image alongside its corresponding post content provided below.
-
-For EACH item, determine if it contains a dog and extract its characteristics.
-Return a JSON array of objects, one for each image provided (in the same order 0 to ${validImages.length - 1}).
-
-Format for each object:
-{
-  "index": number (corresponding to [Item X]),
-  "isDog": boolean,
-  "breed": "Breed name in Korean",
-  "size": "소형/중형/대형",
-  "color": "Fur color in Korean",
-  "features": ["Feature 1", "Feature 2"],
-  "isLostOrFound": "lost" | "found" | "unknown"
-}
-
-Post Contents:
-${contentsPrompt}
-
-Output ONLY the raw JSON array.
-`;
-
-        // Check Rate Limit before calling Gemini
         const allowed = await geminiLimiter.waitAcquire();
-        if (!allowed) {
-            console.error("Gemini rate limit exceeded (PawInHand), skipping batch analysis.");
-            return items.map(() => null);
-        }
+        if (!allowed) return items.map(() => null);
 
-        const result = await model.generateContent([prompt, ...validImages]);
+        const result = await model.generateContent(parts);
         const text = result.response.text();
         const jsonMatch = text.match(/\[[\s\S]*\]/);
         const batchResults = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
 
         const resultsMap = new Map();
         batchResults.forEach((res: any) => {
-            if (typeof res.index === 'number' && validIndices[res.index] !== undefined) {
-                resultsMap.set(validIndices[res.index], res);
+            if (typeof res.index === 'number') {
+                resultsMap.set(res.index, res);
             }
         });
 
@@ -102,10 +100,8 @@ Output ONLY the raw JSON array.
 export async function POST(req: Request) {
     let browser;
     try {
-        const { latitude, longitude, keyword, location } = await req.json();
-        // PawInHand usually has a search or list page.
-        // We will refine this once the user provides specific interaction details.
-        const url = "https://pawinhand.kr/"; // Placeholder URL
+        const { latitude, longitude, keyword, location, sido, sigungu, dogProfile } = await req.json();
+        const url = "https://pawinhand.kr/";
 
         browser = await chromium.launch({
             headless: true,
@@ -117,72 +113,81 @@ export async function POST(req: Request) {
 
         await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
 
-        // TODO: Implement specific interactions provided by user
-        // Example: search for '강아지', '유기견', '목격'
+        // 1. Navigation to "실종/제보"
+        await page.getByRole('list').getByRole('link', { name: '실종/제보' }).click();
+        await page.waitForTimeout(2000);
 
-        // Placeholder extraction logic
-        const articles = await page.$$eval('.article-item', (elements) => {
-            return elements.map((el) => {
-                const title = el.querySelector('.title')?.textContent?.trim() || "";
-                const content = el.querySelector('.description')?.textContent?.trim() || "";
-                const region = el.querySelector('.location')?.textContent?.trim() || "";
-                const imgUrl = el.querySelector('img')?.src || "";
-                const link = (el as HTMLAnchorElement)?.href || "";
-                return { title, content, region, imgUrl, link };
-            });
+        // 2. Select Location
+        await page.getByText('모든 지역').click();
+        await page.locator('section').filter({ hasText: '지역 설정' }).getByRole('combobox').first().selectOption(sido || '서울특별시');
+        await page.getByRole('combobox').nth(3).selectOption(sigungu || '서초구');
+
+        // 3. Animal type (Dog)
+        await page.locator('section').filter({ hasText: '축종 설정' }).getByRole('combobox').selectOption('개');
+
+        // 4. Search
+        await page.getByRole('button', { name: '검색하기' }).click();
+        await page.waitForTimeout(3000);
+
+        // 5. Extract articles
+        const articles = await page.evaluate(() => {
+            const items = Array.from(document.querySelectorAll('a'));
+            return items
+                .filter(a => {
+                    const text = a.innerText || "";
+                    return (text.includes('2025') || text.includes('2026')) && a.querySelector('img');
+                })
+                .map(a => {
+                    const img = a.querySelector('img');
+                    return {
+                        title: a.innerText.split('\n')[0] || "포인핸드 게시글",
+                        content: a.innerText.replace(/\n/g, ' ').trim(),
+                        region: "",
+                        imgUrl: img ? img.src : "",
+                        link: a.href,
+                        timestamp: new Date().toISOString()
+                    };
+                })
+                .slice(0, 40);
         });
 
         await browser.close();
 
-        // For now, return empty or mock if no elements found to avoid errors
-        if (articles.length === 0) {
-            return NextResponse.json({
-                success: true,
-                count: 0,
-                data: [],
-                message: "Waiting for specific selectors to be implemented"
-            });
-        }
-
         const analyzedResults = [];
         const toBatch = [];
 
-        for (const art of articles.slice(0, 3)) {
+        for (const art of articles) {
             const existing = sightingStore.get(art.link);
             if (existing?.analysis) {
+                // Dynamically update match score based on current dogProfile
+                if (dogProfile) {
+                    existing.analysis.matchScore = calculateMatchScore(dogProfile, {
+                        breed: existing.analysis.breed,
+                        size: existing.analysis.size,
+                        color: existing.analysis.color,
+                        features: existing.analysis.features
+                    });
+                }
                 analyzedResults.push(existing);
-            } else if (art.imgUrl && !art.imgUrl.includes('data:image')) {
-                toBatch.push(art);
             } else {
-                const basicArticle = {
-                    ...art,
-                    source: 'PawInHand' as const,
-                    keyword,
-                    timestamp: new Date().toISOString()
-                };
-                sightingStore.add(basicArticle);
-                analyzedResults.push(basicArticle);
+                toBatch.push(art);
             }
         }
 
         if (toBatch.length > 0) {
-            console.log(`Batch analyzing ${toBatch.length} new PawInHand candidates...`);
-            const batchAnalyses = await analyzeSightingsBatch(toBatch);
+            const chunkSize = 15;
+            for (let i = 0; i < toBatch.length; i += chunkSize) {
+                const chunk = toBatch.slice(i, i + chunkSize);
+                console.log(`Batch analyzing ${chunk.length} PawInHand candidates...`);
+                const batchAnalyses = await analyzeSightingsBatch(chunk, dogProfile);
 
-            toBatch.forEach((art, i) => {
-                const analysis = batchAnalyses[i];
-                const fullArticle = {
-                    ...art,
-                    analysis,
-                    source: 'PawInHand' as const,
-                    keyword,
-                    timestamp: new Date().toISOString()
-                };
-                sightingStore.add(fullArticle);
-                if (analysis && analysis.isDog) {
+                chunk.forEach((art, j) => {
+                    const analysis = batchAnalyses[j];
+                    const fullArticle = { ...art, analysis, source: 'PawInHand' as const, keyword: keyword || "", timestamp: art.timestamp || new Date().toISOString() };
+                    sightingStore.add(fullArticle);
                     analyzedResults.push(fullArticle);
-                }
-            });
+                });
+            }
         }
 
         return NextResponse.json({
@@ -192,8 +197,8 @@ export async function POST(req: Request) {
         });
 
     } catch (error) {
+        console.error("PawInHand Scraper Error:", error);
         if (browser) await browser.close();
-        console.error("PawInHand Scraping Error:", error);
         return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
     }
 }

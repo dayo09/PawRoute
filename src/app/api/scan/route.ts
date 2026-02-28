@@ -3,11 +3,13 @@ import { NextResponse } from 'next/server';
 export async function POST(req: Request) {
     try {
         const body = await req.json();
-        const { latitude, longitude, keyword: userKeyword, location: userLocation } = body;
+        const { latitude, longitude, keyword: userKeyword, location: userLocation, sido: userSido, sigungu: userSigungu, dogProfile } = body;
 
         const defaultKeywords = ["강아지", "유기견", "목격"];
         const keywords = userKeyword ? [userKeyword] : defaultKeywords;
         const location = userLocation || "우면동";
+        const sido = userSido || "서울특별시";
+        const sigungu = userSigungu || "서초구";
 
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
@@ -20,13 +22,13 @@ export async function POST(req: Request) {
                 fetch(`${baseUrl}/api/scrape/karrot`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ latitude, longitude, keyword: kw, location })
+                    body: JSON.stringify({ latitude, longitude, keyword: kw, location, sido, sigungu, dogProfile })
                 }).then(res => res.json()).catch(err => ({ success: false, error: err.message })),
 
                 fetch(`${baseUrl}/api/scrape/pawinhand`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ latitude, longitude, keyword: kw, location })
+                    body: JSON.stringify({ latitude, longitude, keyword: kw, location, sido, sigungu, dogProfile })
                 }).then(res => res.json()).catch(err => ({ success: false, error: err.message }))
             ]);
 

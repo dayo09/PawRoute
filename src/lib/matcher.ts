@@ -10,12 +10,32 @@ export function calculateMatchScore(dog1: DogFeatures, dog2: DogFeatures): numbe
     let score = 0;
     const totalWeight = 10;
 
-    const b1 = (dog1.breed || "").toLowerCase();
-    const b2 = (dog2.breed || "").toLowerCase();
-    const s1 = (dog1.size || "").toLowerCase();
-    const s2 = (dog2.size || "").toLowerCase();
-    const c1 = (dog1.color || dog1.primaryColor || "").toLowerCase();
-    const c2 = (dog2.color || dog2.primaryColor || "").toLowerCase();
+    const normalize = (val: string) => {
+        if (!val) return "";
+        val = val.toLowerCase().trim();
+        const map: Record<string, string> = {
+            // Sizes
+            "small": "소형", "medium": "중형", "large": "대형", "extra large": "대형",
+            // Colors
+            "white": "하얀색", "black": "검정색", "brown": "갈색", "grey": "회색", "gray": "회색",
+            "golden": "노란색", "cream": "크림색", "yellow": "노란색", "red": "빨간색",
+            // Breeds
+            "poodle": "푸들", "maltiz": "말티즈", "maltese": "말티즈", "pomeranian": "포메라니안",
+            "shih tzu": "시츄", "yorkshire terrier": "요크셔테리어", "golden retriever": "골든 리트리버",
+            "jindo": "진돗개", "mixed": "믹스견", "mixed breed": "믹스견", "unknown": "믹스견",
+            "korean jindo": "진돗개", "bichon": "비숑", "bichon frise": "비숑", "chihuahua": "치와와",
+            "shiba": "시바견", "welsh corgi": "웰시코기", "corgi": "웰시코기", "dachshund": "닥스훈트",
+            "beagle": "비글", "cocker spaniel": "코카스패니얼", "bulldog": "불독"
+        };
+        return map[val] || val;
+    };
+
+    const b1 = normalize(dog1.breed || "");
+    const b2 = normalize(dog2.breed || "");
+    const s1 = normalize(dog1.size || "");
+    const s2 = normalize(dog2.size || "");
+    const c1 = normalize(dog1.color || dog1.primaryColor || "");
+    const c2 = normalize(dog2.color || dog2.primaryColor || "");
     const f1 = dog1.features || [];
     const f2 = dog2.features || [];
 

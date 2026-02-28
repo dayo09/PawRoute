@@ -3,14 +3,15 @@ import { chromium } from 'playwright';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import sightingStore from '@/lib/sightingStore';
 import geminiLimiter from '@/lib/geminiLimiter';
+import { calculateMatchScore } from '@/lib/matcher';
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_GENERATIVE_AI_API_KEY || "");
 
-async function analyzeSightingsBatch(items: { imgUrl: string, content: string, link: string }[]) {
+async function analyzeSightingsBatch(items: { imgUrl: string, content: string, link: string }[], dogProfile?: any) {
     if (items.length === 0) return [];
 
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
         // 1. Prepare image data parts for Gemini
         const imageParts = await Promise.all(items.map(async (item) => {
@@ -31,7 +32,6 @@ async function analyzeSightingsBatch(items: { imgUrl: string, content: string, l
             }
         }));
 
-        // Filter valid parts to send to Gemini
         const validIndices: number[] = [];
         const validImages: any[] = [];
         imageParts.forEach((part, i) => {
@@ -41,54 +41,59 @@ async function analyzeSightingsBatch(items: { imgUrl: string, content: string, l
             }
         });
 
-        if (validImages.length === 0) return items.map(() => null);
-
-        // 2. Build Multi-Item Prompt
-        const contentsPrompt = validIndices.map((idx, i) =>
-            `[Item ${i}] (Link: ${items[idx].link}): "${items[idx].content}"`
+        const contentsPrompt = items.map((item, i) =>
+            `[Item ${i}] (Link: ${item.link}): "${item.content}"`
         ).join('\n\n');
 
-        const prompt = `
-You are an expert dog behaviorist analyzing multiple community posts for lost/found dogs.
-I have provided ${validImages.length} images. Analyze each image alongside its corresponding post content provided below.
+        const dogContext = dogProfile ? `The user is looking for a dog with these characteristics:
+- Breed: ${dogProfile.breed}
+- Color: ${dogProfile.primaryColor} ${dogProfile.secondaryColor || ''}
+- Features: ${dogProfile.features?.join(', ')}
+` : "";
 
-For EACH item, determine if it contains a dog and extract its characteristics.
-Return a JSON array of objects, one for each image provided (in the same order 0 to ${validImages.length - 1}).
+        const systemInstructions = `
+You are an expert dog behaviorist analyzing community posts for lost/found dogs.
+Analyze the provided items (each item has a text description and potentially an image).
+Determine if they match the lost dog described below.
 
-Format for each object:
-{
-  "index": number (corresponding to [Item X]),
-  "isDog": boolean,
-  "breed": "Breed name in Korean",
-  "size": "소형/중형/대형",
-  "color": "Fur color in Korean",
-  "features": ["Feature 1", "Feature 2"],
-  "isLostOrFound": "lost" | "found" | "unknown"
-}
+${dogContext}
 
-Post Contents:
-${contentsPrompt}
+For EACH item, return a JSON object with:
+- "index": the item number
+- "isDog": boolean
+- "matchScore": number (0.0 to 1.0) - How well this post matches the user's dog.
+- "breed": Extracted breed in Korean
+- "size": 소형/중형/대형
+- "color": Extracted color in Korean
+- "features": array of unique features
+- "isLostOrFound": "lost" | "found" | "unknown"
 
-Output ONLY the raw JSON array.
+Return ONLY a JSON array of these objects.
 `;
 
-        // Check Rate Limit before calling Gemini
-        const allowed = await geminiLimiter.waitAcquire();
-        if (!allowed) {
-            console.error("Gemini rate limit exceeded, skipping batch analysis.");
-            return items.map(() => null);
-        }
+        const parts: any[] = [systemInstructions];
 
-        const result = await model.generateContent([prompt, ...validImages]);
+        // Interleave text and images for better association
+        items.forEach((item, i) => {
+            parts.push(`--- ITEM ${i} ---`);
+            parts.push(`Description: "${item.content}"`);
+            if (imageParts[i]) {
+                parts.push(imageParts[i]);
+            }
+        });
+
+        const allowed = await geminiLimiter.waitAcquire();
+        if (!allowed) return items.map(() => null);
+
+        const result = await model.generateContent(parts);
         const text = result.response.text();
         const jsonMatch = text.match(/\[[\s\S]*\]/);
         const batchResults = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
 
-        // 3. Map batch results back to original items array
         const resultsMap = new Map();
         batchResults.forEach((res: any) => {
-            if (typeof res.index === 'number' && validIndices[res.index] !== undefined) {
-                resultsMap.set(validIndices[res.index], res);
+            if (typeof res.index === 'number') {
+                resultsMap.set(res.index, res);
             }
         });
 
@@ -103,7 +108,7 @@ Output ONLY the raw JSON array.
 export async function POST(req: Request) {
     let browser;
     try {
-        const { latitude, longitude, keyword = "유기견", location = "우면동" } = await req.json();
+        const { latitude, longitude, keyword = "유기견", location = "우면동", sido, sigungu, dogProfile } = await req.json();
 
         browser = await chromium.launch({
             headless: true,
@@ -206,7 +211,7 @@ export async function POST(req: Request) {
         const filterKeywords = ['발견', '목격', '보호', '찾아요', '실종', '강아지', '개', '유기견'];
         const candidates = articles.filter(art =>
             filterKeywords.some(kw => art.content?.includes(kw) || art.title?.includes(kw))
-        ).slice(0, 5);
+        ).slice(0, 40); // Increased limit
 
         const analyzedResults = [];
         const toBatch = [];
@@ -217,6 +222,15 @@ export async function POST(req: Request) {
 
             if (existing?.analysis) {
                 console.log("Using stored result for:", art.link);
+                // Dynamically update match score based on current dogProfile
+                if (dogProfile) {
+                    existing.analysis.matchScore = calculateMatchScore(dogProfile, {
+                        breed: existing.analysis.breed,
+                        size: existing.analysis.size,
+                        color: existing.analysis.color,
+                        features: existing.analysis.features
+                    });
+                }
                 analyzedResults.push(existing);
             } else if (art.imgUrl && !art.imgUrl.includes('data:image')) {
                 toBatch.push(art);
@@ -232,28 +246,21 @@ export async function POST(req: Request) {
             }
         }
 
-        // Perform batch analysis for new candidates
+        // Perform batch analysis in chunks of 15 to stay safe
         if (toBatch.length > 0) {
-            console.log(`Batch analyzing ${toBatch.length} new Karrot candidates...`);
-            const batchAnalyses = await analyzeSightingsBatch(toBatch);
+            const chunkSize = 15;
+            for (let i = 0; i < toBatch.length; i += chunkSize) {
+                const chunk = toBatch.slice(i, i + chunkSize);
+                console.log(`Batch analyzing ${chunk.length} Karrot candidates...`);
+                const batchAnalyses = await analyzeSightingsBatch(chunk, dogProfile);
 
-            toBatch.forEach((art, i) => {
-                const analysis = batchAnalyses[i];
-                const fullArticle = {
-                    ...art,
-                    analysis,
-                    source: 'Karrot' as const,
-                    keyword,
-                    timestamp: art.timestamp || new Date().toISOString()
-                };
-
-                // Save to store
-                sightingStore.add(fullArticle);
-
-                if (analysis && analysis.isDog) {
+                chunk.forEach((art, j) => {
+                    const analysis = batchAnalyses[j];
+                    const fullArticle = { ...art, analysis, source: 'Karrot' as const, keyword, timestamp: art.timestamp || new Date().toISOString() };
+                    sightingStore.add(fullArticle);
                     analyzedResults.push(fullArticle);
-                }
-            });
+                });
+            }
         }
 
         return NextResponse.json({

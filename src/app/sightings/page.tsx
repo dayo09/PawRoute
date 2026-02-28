@@ -38,6 +38,8 @@ export default function SightingsPage() {
     const [location, setLocation] = useState<{ lat: number, lon: number } | null>(null);
     const [isAutoScan, setIsAutoScan] = useState(false);
     const [searchLocation, setSearchLocation] = useState("우면동");
+    const [searchSido, setSearchSido] = useState("서울특별시");
+    const [searchSigungu, setSearchSigungu] = useState("서초구");
     const [searchKeyword, setSearchKeyword] = useState("유기견");
     const [locationError, setLocationError] = useState<string | null>(null);
 
@@ -88,19 +90,25 @@ export default function SightingsPage() {
                     setLocation({ lat: latitude, lon: longitude });
                     addLog("위치 승인 완료: 내 주변 동네를 탐색합니다.", "success");
 
-                    // Try to reverse geocode to get the "Dong" name
+                    // Try to reverse geocode to get the details
                     fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&addressdetails=1`)
                         .then(res => res.json())
                         .then(data => {
                             const addr = data.address;
                             const dong = addr.suburb || addr.neighbourhood || addr.city_district || "";
+                            const sido = addr.city || addr.province || "";
+                            const sigungu = addr.county || addr.borough || addr.city_district || "";
+
                             if (dong && (dong.endsWith('동') || dong.endsWith('읍') || dong.endsWith('면'))) {
                                 setSearchLocation(dong);
-                                addLog(`현재 위치(${dong})로 동네를 설정했습니다.`, "info");
                             }
+                            if (sido) setSearchSido(sido);
+                            if (sigungu) setSearchSigungu(sigungu);
+
+                            addLog(`현재 위치(${sido} ${sigungu} ${dong})로 설정했습니다.`, "info");
                         })
                         .catch(() => {
-                            addLog("동네 이름을 자동으로 가져오지 못했습니다. 직접 입력해 주세요.", "info");
+                            addLog("위치 정보를 상세히 가져오지 못했습니다. 직접 입력해 주세요.", "info");
                         });
 
                     fetchSightings(latitude, longitude);
@@ -130,23 +138,38 @@ export default function SightingsPage() {
         addLog("통합 스캔 엔진 기동 중 (당근마켓 + 포인핸드)...", "info");
 
         try {
-            const resp = await fetch("/api/scan", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    latitude: lat || location?.lat || 37.5665,
-                    longitude: lon || location?.lon || 126.9780,
-                    location: searchLocation,
-                    keyword: searchKeyword
-                })
+            const body = {
+                latitude: location?.lat,
+                longitude: location?.lon,
+                keyword: searchKeyword,
+                location: searchLocation,
+                sido: searchSido,
+                sigungu: searchSigungu,
+                dogProfile: myDog
+            };
+
+            const response = await fetch('/api/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
             });
-            const data = await resp.json();
+            const data = await response.json();
 
             if (data.success) {
                 addLog(`스캔 완료: 당근(${data.summary.karrot}) + 포인핸드(${data.summary.pawinhand})`, "success");
 
-                // Sort by timestamp if available, latest first
-                const sortedSightings = data.results.sort((a: any, b: any) => {
+                // Filter by Lost Date if available
+                let filtered = data.results;
+                if (myDog?.lostDate) {
+                    const lostTime = new Date(myDog.lostDate).getTime();
+                    filtered = filtered.filter((s: any) => {
+                        const sTime = new Date(s.timestamp || 0).getTime();
+                        return sTime >= lostTime - (24 * 60 * 60 * 1000); // Allow 1 day grace
+                    });
+                }
+
+                // Sort by timestamp, latest first
+                const sortedSightings = filtered.sort((a: any, b: any) => {
                     const timeA = new Date(a.timestamp || 0).getTime();
                     const timeB = new Date(b.timestamp || 0).getTime();
                     return timeB - timeA;
@@ -154,29 +177,14 @@ export default function SightingsPage() {
 
                 setSightings(sortedSightings);
 
-                // Add each finding to the log
-                sortedSightings.forEach((s: any) => {
-                    addLog(`[${s.source}] 발견: ${s.title || s.content.substring(0, 20) + '...'}`, "info");
-                });
-
                 if (myDog) {
-                    const matches = sortedSightings.filter((s: any) => {
-                        if (!s.analysis) return false;
-                        const score = calculateMatchScore(myDog, {
-                            breed: s.analysis.breed,
-                            size: s.analysis.size,
-                            color: s.analysis.color,
-                            features: s.analysis.features
-                        });
-                        return score > 0.6;
-                    });
-
-                    if (matches.length > 0) {
-                        setNotification(`${matches.length}마리의 일치하는 강아지가 발견되었습니다!`);
-                        addLog(`매칭 발견! 일치율 ${Math.round(calculateMatchScore(myDog, matches[0].analysis!) * 100)}%`, "success");
+                    const topMatch = sortedSightings.find((s: any) => (s.analysis?.matchScore || 0) > 0.8);
+                    if (topMatch) {
+                        setNotification(`내 강아지와 매우 유사한 포스트가 발견되었습니다!`);
                     }
                 }
-            } else {
+            }
+            else {
                 addLog(`스캔 실패: ${data.error}`, "warning");
             }
         } catch (err) {
@@ -233,7 +241,7 @@ export default function SightingsPage() {
                             className="w-full py-4 px-4 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-center gap-2 font-bold text-secondary hover:bg-slate-100 transition-all active:scale-95 mb-4"
                         >
                             <Navigation className="w-4 h-4 text-primary" />
-                            내 위치 다시 설정하기
+                            <span>내 위치 다시 설정하기</span>
                         </button>
                         {location ? (
                             <div className="text-center">
@@ -265,6 +273,29 @@ export default function SightingsPage() {
 
                     <div className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-xl shadow-slate-200/50 space-y-5">
                         <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic mb-2">Search Filters</p>
+
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-500 mb-2 block uppercase tracking-wider">시/도</label>
+                                <input
+                                    type="text"
+                                    value={searchSido}
+                                    onChange={(e) => setSearchSido(e.target.value)}
+                                    placeholder="예: 서울특별시"
+                                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-bold focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-slate-300"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-500 mb-2 block uppercase tracking-wider">시/군/구</label>
+                                <input
+                                    type="text"
+                                    value={searchSigungu}
+                                    onChange={(e) => setSearchSigungu(e.target.value)}
+                                    placeholder="예: 서초구"
+                                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-bold focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-slate-300"
+                                />
+                            </div>
+                        </div>
 
                         <div>
                             <label className="text-[10px] font-bold text-slate-500 mb-2 block uppercase tracking-wider">탐색 동네 (동/읍/면)</label>
@@ -355,7 +386,7 @@ export default function SightingsPage() {
                             className="px-10 py-6 bg-secondary text-white rounded-[2rem] font-black text-xl hover:bg-slate-800 transition-all shadow-2xl shadow-slate-300 active:scale-95 disabled:opacity-50 flex items-center gap-3 group"
                         >
                             <RefreshCw className={`w-6 h-6 ${loading ? "animate-spin" : "group-hover:rotate-180 transition-transform duration-500"}`} />
-                            REFRESH
+                            <span>REFRESH</span>
                         </button>
                     </header>
 
@@ -372,87 +403,171 @@ export default function SightingsPage() {
                             <p className="text-3xl font-black text-slate-300 italic uppercase tracking-tighter">Analyzing Multi-source Feed...</p>
                         </div>
                     ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                            <AnimatePresence mode="popLayout">
-                                {sightings.map((s: any, i: number) => {
-                                    const matchScore = myDog && s.analysis ? calculateMatchScore(myDog, {
-                                        breed: s.analysis.breed,
-                                        size: s.analysis.size,
-                                        color: s.analysis.color,
-                                        features: s.analysis.features
-                                    }) : 0;
-                                    const isMatch = matchScore > 0.6;
+                        <div className="space-y-12">
+                            {/* Best Matches / Highlights */}
+                            {sightings.filter((s: any) => (s.analysis?.matchScore || 0) > 0.6).length > 0 && (
+                                <section>
+                                    <div className="flex items-center gap-3 mb-8">
+                                        <Sparkles className="w-6 h-6 text-primary" />
+                                        <h2 className="text-2xl font-black text-secondary italic uppercase tracking-tight">Best Matches</h2>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+                                        {sightings.filter((s: any) => (s.analysis?.matchScore || 0) > 0.6).map((s: any, i: number) => {
+                                            const featureScore = myDog && s.analysis ? calculateMatchScore(myDog, {
+                                                breed: s.analysis.breed,
+                                                size: s.analysis.size,
+                                                color: s.analysis.color,
+                                                features: s.analysis.features
+                                            }) : 0;
 
-                                    return (
-                                        <motion.article
-                                            layout
-                                            key={i}
-                                            initial={{ opacity: 0, scale: 0.95 }}
-                                            animate={{ opacity: 1, scale: 1 }}
-                                            className={`bg-white rounded-[3.5rem] border border-slate-100 shadow-2xl shadow-slate-200/40 relative overflow-hidden group flex flex-col ${isMatch ? "ring-8 ring-primary/20" : ""}`}
-                                        >
-                                            <div className="absolute top-6 right-6 z-20 px-4 py-2 bg-white/90 backdrop-blur rounded-xl shadow-sm border border-slate-100 text-[10px] font-black text-slate-500 tracking-widest uppercase">
-                                                {s.source}
-                                            </div>
-
-                                            {isMatch && (
-                                                <div className="absolute top-8 left-8 z-20 px-6 py-3 bg-primary text-white rounded-2xl shadow-2xl flex items-center gap-2 font-black text-sm animate-bounce italic tracking-widest">
-                                                    <CheckCircle2 className="w-5 h-5 font-bold" />
-                                                    {Math.round(matchScore * 100)}% MATCH
-                                                </div>
-                                            )}
-
-                                            <div className="relative h-48 overflow-hidden">
-                                                <Image
-                                                    src={s.imgUrl || "https://images.unsplash.com/photo-1543466835-00a7907e9de1"}
-                                                    alt={s.title}
-                                                    fill
-                                                    className="object-cover group-hover:scale-105 transition-transform duration-1000"
-                                                />
-                                                <div className="absolute bottom-4 left-6 flex gap-2">
-                                                    <span className={`px-4 py-1.5 rounded-xl text-[9px] font-black shadow-2xl backdrop-blur-xl border border-white/20 ${s.analysis?.isLostOrFound === "found" ? "bg-accent text-white" : "bg-primary text-white"}`}>
-                                                        {s.analysis?.isLostOrFound === "found" ? "SIGHTED / RESCUED" : "LOST"}
-                                                    </span>
-                                                </div>
-                                            </div>
-
-                                            <div className="p-6 flex flex-col flex-1">
-                                                <div className="flex items-center gap-2 text-slate-400 mb-3 font-black text-[9px] uppercase tracking-[0.2em]">
-                                                    <MapPin className="w-3.5 h-3.5 text-primary" />
-                                                    {s.region}
-                                                    {s.timestamp && (
-                                                        <>
-                                                            <span className="mx-1">•</span>
-                                                            {new Date(s.timestamp).toLocaleDateString()}
-                                                        </>
-                                                    )}
-                                                </div>
-                                                <h3 className="text-xl font-black text-secondary mb-3 line-clamp-1 italic tracking-tight">{s.title || "Untitled Sighting"}</h3>
-                                                <p className="text-slate-500 font-medium text-sm line-clamp-2 mb-6 leading-relaxed">{s.content}</p>
-
-                                                <div className="mt-auto flex items-center justify-between pt-8 border-t border-slate-100">
-                                                    <div className="flex -space-x-3">
-                                                        {[1, 2, 3].map((_, idx) => (
-                                                            <div key={idx} className="w-12 h-12 rounded-2xl bg-slate-50 border-4 border-white flex items-center justify-center shadow-sm">
-                                                                <Sparkles className="w-5 h-5 text-slate-300" />
-                                                            </div>
-                                                        ))}
+                                            return (
+                                                <motion.article
+                                                    layout
+                                                    key={`high-${i}`}
+                                                    initial={{ opacity: 0, scale: 0.95 }}
+                                                    animate={{ opacity: 1, scale: 1 }}
+                                                    className="bg-white rounded-[3.5rem] border border-slate-100 shadow-2xl ring-8 ring-primary/10 relative overflow-hidden group flex flex-col"
+                                                >
+                                                    <div className="absolute top-6 right-6 z-20 px-4 py-2 bg-white/90 backdrop-blur rounded-xl shadow-sm border border-slate-100 text-[10px] font-black text-slate-500 tracking-widest uppercase">
+                                                        {s.source}
                                                     </div>
-                                                    <a
-                                                        href={s.link}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="px-6 py-3 bg-secondary text-white rounded-2xl font-black text-xs hover:bg-slate-800 transition-all flex items-center gap-2 shadow-lg shadow-slate-200"
-                                                    >
-                                                        VIEW ORIGIN
-                                                        <ExternalLink className="w-4 h-4" />
-                                                    </a>
-                                                </div>
+
+                                                    <div className="absolute top-8 left-8 z-20 flex flex-col gap-2">
+                                                        <div className="px-4 py-2 bg-primary text-white rounded-xl shadow-xl flex items-center gap-2 font-black text-[10px] italic tracking-widest">
+                                                            <Cpu className="w-3.5 h-3.5" />
+                                                            AI: {Math.round((s.analysis?.matchScore || 0) * 100)}%
+                                                        </div>
+                                                        {featureScore > 0 && (
+                                                            <div className="px-4 py-2 bg-secondary text-white rounded-xl shadow-xl flex items-center gap-2 font-black text-[10px] italic tracking-widest">
+                                                                <Dog className="w-3.5 h-3.5" />
+                                                                FEATURES: {Math.round(featureScore * 100)}%
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="relative h-56 overflow-hidden">
+                                                        <Image
+                                                            src={s.imgUrl || "https://images.unsplash.com/photo-1543466835-00a7907e9de1"}
+                                                            alt={s.title}
+                                                            fill
+                                                            className="object-cover group-hover:scale-105 transition-transform duration-1000"
+                                                        />
+                                                    </div>
+                                                    <div className="p-8 flex flex-col flex-1">
+                                                        <div className="flex items-center gap-2 text-slate-400 mb-3 font-black text-[9px] uppercase tracking-[0.2em]">
+                                                            <MapPin className="w-3.5 h-3.5 text-primary" />
+                                                            {s.region || "지역 정보 없음"}
+                                                            <span className="mx-1">•</span>
+                                                            <Calendar className="w-3 h-3" />
+                                                            {new Date(s.timestamp).toLocaleDateString()}
+                                                        </div>
+                                                        <h3 className="text-2xl font-black text-secondary mb-4 italic tracking-tight">{s.title || "Found Dog"}</h3>
+                                                        <p className="text-slate-500 font-medium text-base line-clamp-3 mb-8 leading-relaxed">{s.content}</p>
+                                                        <a
+                                                            href={s.link}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="mt-auto w-full py-4 bg-secondary text-white rounded-2xl font-black text-sm hover:bg-slate-800 transition-all flex items-center justify-center gap-2"
+                                                        >
+                                                            VIEW DETAILS
+                                                            <ExternalLink className="w-4 h-4" />
+                                                        </a>
+                                                    </div>
+                                                </motion.article>
+                                            );
+                                        })}
+                                    </div>
+                                </section>
+                            )}
+
+                            {/* All Findings (Compact List) */}
+                            <section>
+                                <div className="flex items-center gap-3 mb-8">
+                                    <List className="w-6 h-6 text-slate-400" />
+                                    <h2 className="text-2xl font-black text-secondary italic uppercase tracking-tight">All Recent Findings</h2>
+                                </div>
+                                <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-xl overflow-hidden">
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left">
+                                            <thead>
+                                                <tr className="bg-slate-50 border-b border-slate-100">
+                                                    <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
+                                                    <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Post Title / Content</th>
+                                                    <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Source</th>
+                                                    <th className="px-4 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">AI Match</th>
+                                                    <th className="px-4 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Feature Match</th>
+                                                    <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-50">
+                                                {sightings.map((s: any, i: number) => {
+                                                    const featureScore = myDog && s.analysis ? calculateMatchScore(myDog, {
+                                                        breed: s.analysis.breed,
+                                                        size: s.analysis.size,
+                                                        color: s.analysis.color,
+                                                        features: s.analysis.features
+                                                    }) : 0;
+
+                                                    return (
+                                                        <tr key={`list-${i}`} className="hover:bg-slate-50/50 transition-colors group">
+                                                            <td className="px-8 py-5">
+                                                                <span className="text-xs font-bold text-slate-400 italic">
+                                                                    {new Date(s.timestamp).toLocaleDateString()}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-8 py-5">
+                                                                <div className="flex flex-col">
+                                                                    <span className="text-sm font-black text-secondary group-hover:text-primary transition-colors line-clamp-1 italic tracking-tight">
+                                                                        {s.title || s.content.substring(0, 40) + "..."}
+                                                                    </span>
+                                                                    <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
+                                                                        <MapPin className="w-2.5 h-2.5" />
+                                                                        {s.region || "Unknown Region"}
+                                                                    </span>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-8 py-5">
+                                                                <span className={`px-3 py-1 rounded-lg text-[9px] font-black tracking-widest uppercase ${s.source === 'Karrot' ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
+                                                                    {s.source}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-5 text-center">
+                                                                <span className={`text-[10px] font-black italic ${s.analysis?.matchScore > 0.6 ? 'text-primary' : 'text-slate-400'}`}>
+                                                                    {Math.round((s.analysis?.matchScore || 0) * 100)}%
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-5 text-center">
+                                                                <span className={`text-[10px] font-black italic ${featureScore > 0.6 ? 'text-secondary' : 'text-slate-400'}`}>
+                                                                    {Math.round(featureScore * 100)}%
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-8 py-5 text-right">
+                                                                <a
+                                                                    href={s.link}
+                                                                    target="_blank"
+                                                                    rel="noopener noreferrer"
+                                                                    className="inline-flex items-center gap-1 text-xs font-black text-slate-300 hover:text-secondary transition-colors italic uppercase tracking-tighter"
+                                                                >
+                                                                    GO
+                                                                    <ExternalLink className="w-3 h-3" />
+                                                                </a>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    {sightings.length === 0 && !loading && (
+                                        <div className="py-20 text-center">
+                                            <div className="inline-flex p-4 bg-slate-50 rounded-2xl mb-4 text-slate-300">
+                                                <Search className="w-8 h-8" />
                                             </div>
-                                        </motion.article>
-                                    );
-                                })}
-                            </AnimatePresence>
+                                            <p className="text-sm font-bold text-slate-400 italic">검색 결과가 없습니다.</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </section>
                         </div>
                     )}
                 </div>

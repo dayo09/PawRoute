@@ -29,13 +29,13 @@ export async function POST(req: Request) {
 
         const prompt = `
       You are an expert dog behaviorist and breed specialist. 
-      Analyze the provided images of a dog and extract the following features in JSON format:
+      Analyze the provided images of a dog and extract the following features in JSON format (Value should be in Korean):
       {
-        "breed": "Breed name (or 'Mixed' if unclear)",
-        "size": "Small/Medium/Large/Extra Large",
-        "primaryColor": "Main fur color",
-        "secondaryColor": "Secondary fur color (if any)",
-        "features": ["Feature 1", "Feature 2", "Distinctive marks like collars, scars, or patterns"],
+        "breed": "품종 이름 (불확실하면 '믹스견')",
+        "size": "소형/중형/대형",
+        "primaryColor": "주된 털 색상 (예: 하얀색, 갈색, 검정색)",
+        "secondaryColor": "보조 털 색상 (있을 경우)",
+        "features": ["특징 1", "특징 2", "인식 가능한 특징 (목줄, 상처, 패턴 등)"],
         "confidence": 0.0 to 1.0
       }
       Be as specific as possible. If multiple dogs are present, focus on the most prominent one.

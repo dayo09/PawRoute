@@ -19,6 +19,7 @@ export default function RegisterPage() {
     const [previews, setPreviews] = useState<string[]>([]);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [result, setResult] = useState<AnalysisResult | null>(null);
+    const [lostDate, setLostDate] = useState<string>(new Date().toISOString().split('T')[0]);
     const [error, setError] = useState<string | null>(null);
 
     const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -75,7 +76,8 @@ export default function RegisterPage() {
 
     const handleComplete = () => {
         if (result) {
-            localStorage.setItem("myDog", JSON.stringify(result));
+            const dogProfile = { ...result, lostDate };
+            localStorage.setItem("myDog", JSON.stringify(dogProfile));
             alert("반려견 정보가 저장되었습니다! PawRoute가 실시간으로 일치하는 목격 글을 찾아 드릴게요.");
             window.location.href = "/sightings";
         }
@@ -156,15 +158,15 @@ export default function RegisterPage() {
                                 }`}
                         >
                             {isAnalyzing ? (
-                                <>
+                                <div className="flex items-center gap-2">
                                     <Loader2 className="w-5 h-5 animate-spin" />
-                                    Gemini가 분석 중...
-                                </>
+                                    <span>Gemini가 분석 중...</span>
+                                </div>
                             ) : (
-                                <>
+                                <div className="flex items-center gap-2">
                                     <Sparkles className="w-5 h-5 font-bold" />
-                                    AI로 특징 분석하기
-                                </>
+                                    <span>AI로 특징 분석하기</span>
+                                </div>
                             )}
                         </button>
                         {error && (
@@ -191,6 +193,17 @@ export default function RegisterPage() {
                                     <CheckCircle2 className="w-6 h-6 text-accent" />
                                     분석 결과
                                 </h2>
+
+                                <div className="mb-8 p-6 bg-orange-50 rounded-[2rem] border border-orange-100/50">
+                                    <label className="text-xs font-black text-primary uppercase tracking-widest block mb-3 italic">언제 잃어버리셨나요?</label>
+                                    <input
+                                        type="date"
+                                        value={lostDate}
+                                        onChange={(e) => setLostDate(e.target.value)}
+                                        className="w-full bg-white border border-orange-200 rounded-2xl px-6 py-4 font-bold text-secondary outline-none focus:ring-4 focus:ring-primary/10 transition-all"
+                                    />
+                                    <p className="text-[10px] text-orange-600/70 mt-3 font-bold italic">* 이 날짜 이후의 게시글만 스캔하여 보여드립니다.</p>
+                                </div>
 
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div className="space-y-4">
